@@ -6,7 +6,7 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Fungsi untuk menghitung RSI (Relative Strength Index)
+// Fungsi untuk menghitung RSI
 function calculateRSI(closes: number[], period: number = 14): number {
   if (closes.length <= period) return 50;
 
@@ -38,74 +38,46 @@ function calculateRSI(closes: number[], period: number = 14): number {
   return 100 - 100 / (1 + rs);
 }
 
-// Fungsi utama Cron Job
 export async function GET() {
   try {
-    // 1. Ambil data Candlestick (Klines) langsung dari Indodax API (Aman dari blokir Vercel)
-    const toTime = Math.floor(Date.now() / 1000);
-    const fromTime = toTime - 86400 * 3; // Data 3 hari terakhir
-    
-    const res = await fetch(
-      `https://indodax.com/tradingview/history?symbol=BTCIDR&resolution=60&from=${fromTime}&to=${toTime}`,
-      {
-        cache: 'no-store',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-        },
-      }
-    );
+    // 1. Ambil Harga Realtime BTC/IDR dari Public Ticker Indodax (Anti-Cloudflare/Anti-Blokir)
+    const indodaxRes = await fetch('https://indodax.com/api/ticker/btcidr', { cache: 'no-store' });
+    const indodaxData = await indodaxRes.json();
 
-    // Ambil data sebagai teks terlebih dahulu untuk validasi aman
-    const textData = await res.text();
-    let data: any;
-    try {
-      data = JSON.parse(textData);
-    } catch (e) {
-      return NextResponse.json(
-        { sukses: false, error: 'Respon dari Indodax bukan format JSON yang valid' },
-        { status: 500 }
-      );
+    if (!indodaxData || !indodaxData.ticker) {
+      return NextResponse.json({ sukses: false, error: 'Gagal ambil ticker Indodax' }, { status: 500 });
     }
 
-    const closePrices: number[] = data.c;
-    const openPrices: number[] = data.o;
-    const highPrices: number[] = data.h;
-    const lowPrices: number[] = data.l;
+    const currentPrice = parseFloat(indodaxData.ticker.last);
 
-    const totalCandles = closePrices.length;
-    const currentPrice = closePrices[totalCandles - 1];
+    // 2. Ambil Histori Harga 1-Jam dari CoinCap API (Terbuka, Tanpa Rate-Limit Vercel)
+    const coinCapRes = await fetch('https://api.coincap.io/v2/assets/bitcoin/history?interval=h1', { cache: 'no-store' });
+    const coinCapData = await coinCapRes.json();
 
-    // 2. Hitung Indikator RSI (14)
+    if (!coinCapData || !Array.isArray(coinCapData.data)) {
+      return NextResponse.json({ sukses: false, error: 'Gagal ambil data histori CoinCap' }, { status: 500 });
+    }
+
+    // Ambil 30 candle jam terakhir
+    const candlesData = coinCapData.data.slice(-30);
+    const closePrices: number[] = candlesData.map((item: any) => parseFloat(item.priceUsd));
+
+    // 3. Hitung Indikator RSI
     const rsi = calculateRSI(closePrices, 14);
 
-    // 3. Deteksi Pola Candlestick Sederhana
-    const lastOpen = openPrices[totalCandles - 1];
-    const lastClose = closePrices[totalCandles - 1];
-    const lastHigh = highPrices[totalCandles - 1];
-    const lastLow = lowPrices[totalCandles - 1];
-
-    const bodySize = Math.abs(lastClose - lastOpen);
-    const lowerShadow = Math.min(lastOpen, lastClose) - lastLow;
-
-    let pattern = 'NO_PATTERN';
-    if (lowerShadow > bodySize * 2 && (lastHigh - Math.max(lastOpen, lastClose)) < bodySize) {
-      pattern = 'BULLISH_HAMMER';
-    }
-
-    // 4. Logika Penentuan Sinyal
+    // 4. Analisis Sinyal
     let signal = 'NEUTRAL';
     let winRate = 50;
-    let reason = 'Konsolidasi / Tidak ada pola kuat';
+    let reason = 'Konsolidasi / Pasar sedang tenang';
 
-    if (rsi < 35 || (rsi < 45 && pattern === 'BULLISH_HAMMER')) {
+    if (rsi < 35) {
       signal = 'BUY';
       winRate = 75;
-      reason = 'RSI Oversold & Terdeteksi Pola Pembalikan Naik';
+      reason = 'RSI Oversold (Harga sudah murah/jenuh jual)';
     } else if (rsi > 68) {
       signal = 'SELL';
       winRate = 70;
-      reason = 'RSI Overbought (Jenuh Beli), Rawan Koreksi';
+      reason = 'RSI Overbought (Harga jenuh beli, rawan koreksi)';
     }
 
     // Format harga ke Rupiah
@@ -126,8 +98,7 @@ export async function GET() {
 
 📈 *Sinyal:* ${signal}
 📊 *Estimasi Win-Rate:* ${winRate}%
-💰 *Harga Saat Ini:* ${formattedPrice}
-🕯️ *Pola Candle:* ${pattern}
+💰 *Harga Indodax:* ${formattedPrice}
 📉 *RSI (14):* ${rsi.toFixed(2)}
 
 💡 *Alasan Analisis:*
@@ -144,7 +115,7 @@ export async function GET() {
       });
     }
 
-    // 6. Simpan Log Sinyal ke Supabase Database
+    // 6. Simpan Log ke Supabase
     if (supabaseUrl && supabaseKey) {
       await supabase.from('trading_signals').insert([
         {
@@ -152,7 +123,7 @@ export async function GET() {
           signal: signal,
           win_rate: winRate,
           price: currentPrice,
-          pattern: pattern,
+          pattern: 'RSI_ANALYSIS',
           rsi: parseFloat(rsi.toFixed(2)),
           reason: reason,
         },
@@ -162,7 +133,7 @@ export async function GET() {
     return NextResponse.json({
       sukses: true,
       sinyal: signal,
-      harga: currentPrice,
+      harga_indodax: formattedPrice,
       rsi: rsi.toFixed(2),
     });
 
