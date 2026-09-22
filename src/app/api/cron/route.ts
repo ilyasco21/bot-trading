@@ -66,7 +66,7 @@ async function sendTelegramMessage(text: string) {
 export async function GET() {
   try {
     const symbol = 'BTCUSDT';
-    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1h&limit=50`);
+    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=50`);
     const data = await res.json();
 
     const candles: Candle[] = data.map((d: any) => ({
