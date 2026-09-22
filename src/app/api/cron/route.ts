@@ -47,15 +47,23 @@ export async function GET() {
     
     const res = await fetch(
       `https://indodax.com/tradingview/history?symbol=BTCIDR&resolution=60&from=${fromTime}&to=${toTime}`,
-      { cache: 'no-store' }
+      {
+        cache: 'no-store',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
+        },
+      }
     );
 
-    const data = await res.json();
-
-    // Validasi data Indodax
-    if (!data || data.s !== 'ok' || !Array.isArray(data.c) || data.c.length === 0) {
+    // Ambil data sebagai teks terlebih dahulu untuk validasi aman
+    const textData = await res.text();
+    let data: any;
+    try {
+      data = JSON.parse(textData);
+    } catch (e) {
       return NextResponse.json(
-        { sukses: false, error: 'Gagal mengambil data dari Indodax' },
+        { sukses: false, error: 'Respon dari Indodax bukan format JSON yang valid' },
         { status: 500 }
       );
     }
