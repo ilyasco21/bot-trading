@@ -1,15 +1,21 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-// Inisialisasi Supabase Client
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Fungsi untuk menghitung RSI
+// Daftar koin yang ingin dipantau
+const WATCHLIST = [
+  { symbol: 'BTC', indodaxId: 'btcidr', geckoid: 'bitcoin', name: 'Bitcoin' },
+  { symbol: 'ETH', indodaxId: 'ethidr', geckoid: 'ethereum', name: 'Ethereum' },
+  { symbol: 'SOL', indodaxId: 'solidr', geckoid: 'solana', name: 'Solana' },
+  { symbol: 'XRP', indodaxId: 'xrpidr', geckoid: 'ripple', name: 'XRP' },
+  { symbol: 'DOGE', indodaxId: 'dogeidr', geckoid: 'dogecoin', name: 'Dogecoin' },
+];
+
 function calculateRSI(closes: number[], period: number = 14): number {
   if (closes.length <= period) return 50;
-
   let gains = 0;
   let losses = 0;
 
@@ -40,110 +46,110 @@ function calculateRSI(closes: number[], period: number = 14): number {
 
 export async function GET() {
   try {
-    // 1. Ambil Harga Realtime BTC/IDR dari Public Ticker Indodax
-    let currentPrice = 0;
-    try {
-      const indodaxRes = await fetch('https://indodax.com/api/ticker/btcidr', { cache: 'no-store' });
-      const indodaxData = await indodaxRes.json();
-      if (indodaxData && indodaxData.ticker) {
-        currentPrice = parseFloat(indodaxData.ticker.last);
+    const activeSignals: string[] = [];
+    const dbLogs: any[] = [];
+
+    // Loop analisis untuk setiap koin
+    for (const coin of WATCHLIST) {
+      let currentPrice = 0;
+      let closePrices: number[] = [];
+
+      // 1. Ambil Harga Indodax
+      try {
+        const res = await fetch(`https://indodax.com/api/ticker/${coin.indodaxId}`, { cache: 'no-store' });
+        const data = await res.json();
+        if (data && data.ticker) {
+          currentPrice = parseFloat(data.ticker.last);
+        }
+      } catch (e) {
+        console.error(`Error Indodax ${coin.symbol}:`, e);
       }
-    } catch (e) {
-      console.error('Error Indodax:', e);
-    }
 
-    // 2. Ambil Histori Harga Bitcoin dari CoinGecko API (100% Bebas Blokir di Vercel)
-    let closePrices: number[] = [];
-    try {
-      const cgRes = await fetch('https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=2', { cache: 'no-store' });
-      const cgData = await cgRes.json();
-      if (cgData && Array.isArray(cgData.prices)) {
-        closePrices = cgData.prices.map((p: [number, number]) => p[1]);
+      // 2. Ambil Histori CoinGecko untuk RSI
+      try {
+        const res = await fetch(`https://api.coingecko.com/api/v3/coins/${coin.geckoid}/market_chart?vs_currency=usd&days=2`, { cache: 'no-store' });
+        const data = await res.json();
+        if (data && Array.isArray(data.prices)) {
+          closePrices = data.prices.map((p: [number, number]) => p[1]);
+        }
+      } catch (e) {
+        console.error(`Error CoinGecko ${coin.symbol}:`, e);
       }
-    } catch (e) {
-      console.error('Error CoinGecko:', e);
+
+      if (closePrices.length === 0) {
+        closePrices = Array(30).fill(currentPrice > 0 ? currentPrice : 1000);
+      }
+
+      // 3. Hitung RSI & Evaluasi Sinyal
+      const rsi = calculateRSI(closePrices, 14);
+      let signal = 'NEUTRAL';
+      let reason = '';
+
+      // Ambang batas yang lebih peka untuk altcoin
+      if (rsi < 38) {
+        signal = 'BUY';
+        reason = 'RSI Oversold (Harga Murah/Jenuh Jual)';
+      } else if (rsi > 65) {
+        signal = 'SELL';
+        reason = 'RSI Overbought (Harga Jenuh Beli, Rawan Koreksi)';
+      }
+
+      const formattedPrice = currentPrice > 0
+        ? new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(currentPrice)
+        : 'Rp -';
+
+      // 4. Jika ada sinyal BUY atau SELL, catat untuk dikirim
+      if (signal !== 'NEUTRAL') {
+        const icon = signal === 'BUY' ? '🚀' : '🔻';
+        activeSignals.push(
+`${icon} *${coin.name} (${coin.symbol}/IDR)*
+• *Sinyal:* ${signal}
+• *Harga:* ${formattedPrice}
+• *RSI (14):* ${rsi.toFixed(2)}
+• *Catatan:* ${reason}`
+        );
+      }
+
+      // Simpan log analisis ke DB
+      dbLogs.push({
+        pair: `${coin.symbol}IDR`,
+        signal: signal,
+        win_rate: signal === 'BUY' ? 75 : signal === 'SELL' ? 70 : 50,
+        price: currentPrice,
+        pattern: 'MULTI_COIN_RSI',
+        rsi: parseFloat(rsi.toFixed(2)),
+        reason: reason || 'Pasar Stabil',
+      });
     }
 
-    // Jika CoinGecko gagal, gunakan dummy fallback berbasis harga saat ini agar fungsi RSI tidak crash
-    if (closePrices.length === 0) {
-      closePrices = Array(30).fill(currentPrice > 0 ? currentPrice : 1000000000);
-    }
-
-    // 3. Hitung RSI
-    const rsi = calculateRSI(closePrices, 14);
-
-    // 4. Analisis Sinyal
-    let signal = 'NEUTRAL';
-    let winRate = 50;
-    let reason = 'Konsolidasi / Pasar sedang stabil';
-
-    if (rsi < 35) {
-      signal = 'BUY';
-      winRate = 75;
-      reason = 'RSI Oversold (Harga sudah murah / jenuh jual)';
-    } else if (rsi > 68) {
-      signal = 'SELL';
-      winRate = 70;
-      reason = 'RSI Overbought (Harga jenuh beli, rawan koreksi)';
-    }
-
-    // Format harga ke Rupiah
-    const formattedPrice = currentPrice > 0
-      ? new Intl.NumberFormat('id-ID', {
-          style: 'currency',
-          currency: 'IDR',
-          maximumFractionDigits: 0
-        }).format(currentPrice)
-      : 'Rp -';
-
-    // 5. Kirim Notifikasi ke Telegram
+    // 5. Kirim Notifikasi Telegram HANYA jika ada sinyal BUY / SELL
     const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
 
-    if (telegramToken && chatId) {
-      const icon = signal === 'BUY' ? '🚀' : signal === 'SELL' ? '🔻' : '⚖️';
-      const telegramMessage = 
-`${icon} *Sinyal Trading Analyst (BTC/IDR)*
-
-📈 *Sinyal:* ${signal}
-📊 *Estimasi Win-Rate:* ${winRate}%
-💰 *Harga Indodax:* ${formattedPrice}
-📉 *RSI (14):* ${rsi.toFixed(2)}
-
-💡 *Alasan Analisis:*
-• ${reason}`;
+    if (telegramToken && chatId && activeSignals.length > 0) {
+      const header = `🚨 *OPSI TRADING DITEMUKAN!*\n\n`;
+      const fullMessage = header + activeSignals.join('\n\n---\n\n');
 
       await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: telegramMessage,
+          text: fullMessage,
           parse_mode: 'Markdown',
         }),
       });
     }
 
-    // 6. Simpan Log ke Supabase
-    if (supabaseUrl && supabaseKey) {
-      await supabase.from('trading_signals').insert([
-        {
-          pair: 'BTCIDR',
-          signal: signal,
-          win_rate: winRate,
-          price: currentPrice,
-          pattern: 'RSI_ANALYSIS',
-          rsi: parseFloat(rsi.toFixed(2)),
-          reason: reason,
-        },
-      ]);
+    // 6. Simpan ke Supabase
+    if (supabaseUrl && supabaseKey && dbLogs.length > 0) {
+      await supabase.from('trading_signals').insert(dbLogs);
     }
 
     return NextResponse.json({
       sukses: true,
-      sinyal: signal,
-      harga_indodax: formattedPrice,
-      rsi: rsi.toFixed(2),
+      sinyal_ditemukan: activeSignals.length,
+      detail: activeSignals.length > 0 ? 'Notifikasi terkirim ke Telegram' : 'Semua koin netral, tidak kirim spam',
     });
 
   } catch (err: any) {
